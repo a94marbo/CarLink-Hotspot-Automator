@@ -1,0 +1,7 @@
+{
+  "name": "CarLink Hotspot Automator",
+  "description": "Monitors car Bluetooth connections and automatically triggers phone Wi-Fi hotspot with customizable delay timers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
