@@ -15,6 +15,12 @@ import { SettingsModal } from './components/SettingsModal';
 import { PlatformGuideModal } from './components/PlatformGuideModal';
 import { TimerConfigCard } from './components/TimerConfigCard';
 import { Sparkles, Car, ShieldCheck, Zap, Info } from 'lucide-react';
+import { 
+  fetchPhonePairedDevices, 
+  isNativeApp, 
+  openPhoneBluetoothSettings, 
+  openPhoneHotspotSettings 
+} from './utils/bluetoothNative';
 
 const INITIAL_DEVICES: BluetoothDevice[] = [
   {
@@ -107,7 +113,7 @@ export default function App() {
 
   const [showSettings, setShowSettings] = useState(false);
   const [showGuide, setShowGuide] = useState(false);
-  const [showSimulator, setShowSimulator] = useState(true);
+  const [showSimulator, setShowSimulator] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
 
@@ -438,36 +444,50 @@ export default function App() {
     );
   };
 
-  // Fetch previously paired/authorized Bluetooth devices via Web Bluetooth getDevices()
-  const handleFetchPairedDevices = async () => {
-    const nav = navigator as unknown as { bluetooth?: { getDevices?: () => Promise<Array<{ id: string; name?: string }>> } };
-    if (!nav.bluetooth?.getDevices) {
-      setScanError('Direct browser query for paired devices requires Chrome/Edge with Web Bluetooth enabled.');
-      return;
+  // Auto-sync paired Bluetooth cars on phone startup if running as native Android app
+  useEffect(() => {
+    if (isNativeApp()) {
+      handleFetchPairedDevices();
     }
+  }, []);
 
+  // Fetch paired Bluetooth devices from phone (Native Android) or Web Bluetooth / Local
+  const handleFetchPairedDevices = async () => {
+    setIsScanning(true);
+    setScanError(null);
     try {
-      const paired = await nav.bluetooth.getDevices();
-      if (!paired || paired.length === 0) {
-        addLog('config_change', 'Paired Device Query', 'No browser-granted Bluetooth devices found. Click "Pair Live BT" or "Add Car" to add your vehicle.', 'info');
+      const res = await fetchPhonePairedDevices();
+      if (!res.success) {
+        setScanError(res.message);
+        addLog('config_change', 'Bluetooth Sync Alert', res.message, 'warning');
+        return;
+      }
+
+      if (res.devices.length === 0) {
+        setScanError(res.message || 'No paired Bluetooth devices detected.');
+        addLog('config_change', 'Bluetooth Sync', res.message, 'info');
         return;
       }
 
       let addedCount = 0;
+      let updatedCount = 0;
+
       setDevices(prev => {
         const next = [...prev];
-        paired.forEach(p => {
-          if (!next.some(d => d.id === p.id)) {
-            next.unshift({
-              id: p.id,
-              name: p.name || 'Paired Vehicle Device',
-              macAddress: `BT:${p.id.slice(0, 8)}`,
-              type: 'car',
-              isConnected: false,
-              isTriggerEnabled: true,
+        res.devices.forEach(newDev => {
+          const existingIdx = next.findIndex(d => d.macAddress === newDev.macAddress || d.id === newDev.id);
+          if (existingIdx >= 0) {
+            next[existingIdx] = {
+              ...next[existingIdx],
+              name: newDev.name,
+              isConnected: newDev.isConnected,
               isRealNativeDevice: true,
-              rssi: -58,
-            });
+              type: newDev.type,
+              carBrand: newDev.carBrand || next[existingIdx].carBrand,
+            };
+            updatedCount++;
+          } else {
+            next.unshift(newDev);
             addedCount++;
           }
         });
@@ -476,12 +496,18 @@ export default function App() {
 
       addLog(
         'config_change',
-        'Paired Devices Synced',
-        `Retrieved ${paired.length} device(s) from browser cache. ${addedCount} new car(s) added.`,
+        res.isNative ? 'Phone Paired Devices Synced' : 'Bluetooth Devices Synced',
+        res.isNative
+          ? `Read ${res.devices.length} paired Bluetooth device(s) directly from your Android phone (${addedCount} new added).`
+          : res.message,
         'success'
       );
-    } catch (err) {
-      console.error(err);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setScanError(`Failed to read paired Bluetooth devices: ${msg}`);
+      addLog('config_change', 'Bluetooth Sync Error', msg, 'alert');
+    } finally {
+      setIsScanning(false);
     }
   };
 
@@ -624,8 +650,10 @@ export default function App() {
         onToggleSound={() => setSettings(s => ({ ...s, soundAlerts: !s.soundAlerts }))}
         onOpenSettings={() => setShowSettings(true)}
         onOpenGuide={() => setShowGuide(true)}
-        onOpenSimulator={() => setShowSimulator(s => !s)}
+        isNative={isNativeApp()}
         hasTriggerDevices={devices.some(d => d.isTriggerEnabled)}
+        isSimulatorActive={showSimulator}
+        onCloseSimulator={() => setShowSimulator(false)}
       />
 
       {/* Main Container */}
@@ -648,7 +676,7 @@ export default function App() {
           onResetDefaults={handleResetDefaultTimers}
         />
 
-        {/* Interactive Drive Simulator (Can be toggled) */}
+        {/* Interactive Drive Simulator (Tucked inside Config Menu, can be opened when testing) */}
         {showSimulator && (
           <DriveSimulator
             devices={devices}
@@ -708,6 +736,8 @@ export default function App() {
               isScanning={isScanning}
               scanError={scanError}
               connectDelaySeconds={settings.connectDelaySeconds}
+              isNative={isNativeApp()}
+              onOpenPhoneBluetoothSettings={openPhoneBluetoothSettings}
             />
           </div>
 
@@ -740,6 +770,11 @@ export default function App() {
           settings={settings}
           onSave={setSettings}
           onClose={() => setShowSettings(false)}
+          showSimulator={showSimulator}
+          onToggleSimulator={(show) => setShowSimulator(show)}
+          onOpenBluetoothSettings={openPhoneBluetoothSettings}
+          onOpenHotspotSettings={openPhoneHotspotSettings}
+          isNative={isNativeApp()}
         />
       )}
 

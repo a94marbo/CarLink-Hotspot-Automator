@@ -1,19 +1,37 @@
 import { useState } from 'react';
-import { Settings, Clock, Bell, Battery, Wifi, ShieldAlert, Check } from 'lucide-react';
+import { Settings, Clock, Bell, Battery, Wifi, ShieldAlert, Check, Sparkles, Smartphone, ExternalLink, Bluetooth } from 'lucide-react';
 import { AppSettings } from '../types';
 
 interface SettingsModalProps {
   settings: AppSettings;
   onSave: (newSettings: AppSettings) => void;
   onClose: () => void;
+  showSimulator?: boolean;
+  onToggleSimulator?: (show: boolean) => void;
+  onOpenBluetoothSettings?: () => void;
+  onOpenHotspotSettings?: () => void;
+  isNative?: boolean;
 }
 
-export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps) {
+export function SettingsModal({ 
+  settings, 
+  onSave, 
+  onClose,
+  showSimulator = false,
+  onToggleSimulator,
+  onOpenBluetoothSettings,
+  onOpenHotspotSettings,
+  isNative = false,
+}: SettingsModalProps) {
   const [form, setForm] = useState<AppSettings>({ ...settings });
+  const [simulatorEnabled, setSimulatorEnabled] = useState(showSimulator);
 
   const handleSave = (e: React.FormEvent) => {
     e.preventDefault();
     onSave(form);
+    if (onToggleSimulator) {
+      onToggleSimulator(simulatorEnabled);
+    }
     onClose();
   };
 
@@ -236,6 +254,76 @@ export function SettingsModal({ settings, onSave, onClose }: SettingsModalProps)
                   className="w-4 h-4 rounded text-blue-600 focus:ring-blue-500"
                 />
               </label>
+            </div>
+          </div>
+
+          {/* Section 4: Testing Sandbox & Drive Simulator (Config Menu Only) */}
+          <div className="space-y-3 p-4 bg-slate-50/80 rounded-xl border border-slate-200">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-slate-700">
+                <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                <span>Trip Simulator & Testing Sandbox</span>
+              </div>
+              <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-200 text-slate-600">
+                Debug / Demo
+              </span>
+            </div>
+
+            <p className="text-[11px] text-slate-500 leading-relaxed">
+              Enables the interactive simulation deck to test car Bluetooth connect/disconnect cycles, delay countdowns, and Wi-Fi hotspot transitions without sitting in a running vehicle.
+            </p>
+
+            <div className="flex items-center justify-between p-3 bg-white rounded-lg border border-slate-200">
+              <div>
+                <p className="text-xs font-bold text-slate-800">Show Drive Simulator Deck</p>
+                <p className="text-[11px] text-slate-500">Displays the virtual car ignition & Bluetooth trip tester</p>
+              </div>
+              <input
+                id="toggle-simulator-in-config"
+                type="checkbox"
+                checked={simulatorEnabled}
+                onChange={(e) => {
+                  setSimulatorEnabled(e.target.checked);
+                  if (onToggleSimulator) {
+                    onToggleSimulator(e.target.checked);
+                  }
+                }}
+                className="w-4 h-4 rounded text-amber-600 focus:ring-amber-500"
+              />
+            </div>
+          </div>
+
+          {/* Section 5: Android System Settings Links */}
+          <div className="space-y-3 p-4 bg-blue-50/50 rounded-xl border border-blue-200">
+            <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wider text-blue-900">
+              <Smartphone className="w-3.5 h-3.5 text-blue-600" />
+              <span>Android System Shortcuts</span>
+            </div>
+            <p className="text-[11px] text-blue-800/80">
+              Quickly launch phone system menus to pair new vehicles or manage tethering preferences.
+            </p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  if (onOpenBluetoothSettings) onOpenBluetoothSettings();
+                }}
+                className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-white text-blue-900 border border-blue-200 hover:bg-blue-50 transition-colors shadow-2xs"
+              >
+                <Bluetooth className="w-3.5 h-3.5 text-blue-600" />
+                <span>Pair New Car (BT Settings)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (onOpenHotspotSettings) onOpenHotspotSettings();
+                }}
+                className="flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-white text-blue-900 border border-blue-200 hover:bg-blue-50 transition-colors shadow-2xs"
+              >
+                <Wifi className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Phone Hotspot Settings</span>
+              </button>
             </div>
           </div>
 
