@@ -1,0 +1,203 @@
+name: Test & Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: 'Build Type (debug, release, or both)'
+        required: true
+        default: 'debug'
+        type: choice
+        options:
+          - debug
+          - release
+          - both
+      run_unit_tests:
+        description: 'Run Android unit tests'
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Web Application Validation & Build
+  # ---------------------------------------------------------------------------
+  validate-web:
+    name: Validate & Build Web Assets
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install npm dependencies
+        run: npm ci || npm install
+
+      - name: TypeScript validation & Linting
+        run: npm run lint
+
+      - name: Compile web app bundle
+        run: npm run build
+
+      - name: Upload compiled web assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: dist/
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # 2. Android APK Testing and Build Pipeline
+  # ---------------------------------------------------------------------------
+  build-android-apk:
+    name: Build & Test Android APK
+    needs: validate-web
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install npm dependencies
+        run: npm ci || npm install
+
+      - name: Download compiled web assets
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: dist/
+
+      - name: Sync Capacitor Android Project
+        run: |
+          npx cap sync android
+
+      - name: Set up Java Development Kit (JDK 21)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Make Gradle wrapper executable
+        run: chmod +x android/gradlew
+
+      # Unit Tests
+      - name: Run Android Unit Tests
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_unit_tests }}
+        working-directory: android
+        run: ./gradlew testDebugUnitTest
+
+      # Compile Debug APK
+      - name: Build Debug APK
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.build_type == 'debug' || inputs.build_type == 'both' }}
+        working-directory: android
+        run: ./gradlew assembleDebug --stacktrace
+
+      # Compile Release APK (Unsigned)
+      - name: Build Release APK
+        if: ${{ github.event_name == 'workflow_dispatch' && (inputs.build_type == 'release' || inputs.build_type == 'both') || startsWith(github.ref, 'refs/tags/v') }}
+        working-directory: android
+        run: ./gradlew assembleRelease --stacktrace
+
+      # Optional Release Signing (if secrets are configured in GitHub repository)
+      - name: Sign Release APK (if keystore provided)
+        if: ${{ env.SIGNING_KEY != '' }}
+        env:
+          SIGNING_KEY: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          echo "Signing release APK with repository secret credentials..."
+          echo "$SIGNING_KEY" | base64 -d > android/app/release.keystore
+          jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
+            -keystore android/app/release.keystore \
+            -storepass "$KEYSTORE_PASSWORD" \
+            -keypass "$KEY_PASSWORD" \
+            android/app/build/outputs/apk/release/app-release-unsigned.apk "$KEY_ALIAS"
+          zipalign -v 4 android/app/build/outputs/apk/release/app-release-unsigned.apk \
+            android/app/build/outputs/apk/release/CarLink-Hotspot-Automator-release.apk
+
+      # Collect and rename APKs for clean artifact distribution
+      - name: Prepare APK Artifacts
+        run: |
+          mkdir -p build-artifacts
+          if [ -f "android/app/build/outputs/apk/debug/app-debug.apk" ]; then
+            cp android/app/build/outputs/apk/debug/app-debug.apk build-artifacts/CarLink-Hotspot-Automator-debug.apk
+          fi
+          if [ -f "android/app/build/outputs/apk/release/app-release-unsigned.apk" ]; then
+            cp android/app/build/outputs/apk/release/app-release-unsigned.apk build-artifacts/CarLink-Hotspot-Automator-release-unsigned.apk
+          fi
+          if [ -f "android/app/build/outputs/apk/release/CarLink-Hotspot-Automator-release.apk" ]; then
+            cp android/app/build/outputs/apk/release/CarLink-Hotspot-Automator-release.apk build-artifacts/CarLink-Hotspot-Automator-release-signed.apk
+          fi
+          ls -la build-artifacts/
+
+      # Calculate Checksums
+      - name: Generate SHA-256 Checksums
+        working-directory: build-artifacts
+        run: |
+          sha256sum *.apk > CHECKSUMS.txt
+          cat CHECKSUMS.txt
+
+      # Upload APKs as GitHub Actions Artifacts
+      - name: Upload APK Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: carlink-hotspot-automator-apk
+          path: build-artifacts/
+          retention-days: 30
+
+      # Upload Test Reports (if available)
+      - name: Upload Test Reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-reports
+          path: android/app/build/reports/tests/
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # Summary output on GitHub Actions Job page
+      - name: Output Job Summary
+        run: |
+          echo "## 🚗 CarLink Hotspot Automator APK Build Complete" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Generated APK Files:" >> $GITHUB_STEP_SUMMARY
+          echo "| File | Size | SHA-256 Checksum |" >> $GITHUB_STEP_SUMMARY
+          echo "| :--- | :--- | :--- |" >> $GITHUB_STEP_SUMMARY
+          cd build-artifacts
+          for f in *.apk; do
+            if [ -f "$f" ]; then
+              SIZE=$(du -h "$f" | cut -f1)
+              HASH=$(sha256sum "$f" | cut -d' ' -f1)
+              echo "| \`$f\` | $SIZE | \`$HASH\` |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> 📱 **Installation Tip**: Download the \`CarLink-Hotspot-Automator-debug.apk\` from the artifact section below and transfer it to your Android device. Enable *Install unknown apps* in your phone's Security settings to install." >> $GITHUB_STEP_SUMMARY

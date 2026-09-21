@@ -157,4 +157,29 @@ npm run build
 
 # Run linter
 npm run lint
+
+# Sync web build to native Android project
+npm run cap:sync
 ```
+
+---
+
+## GitHub Actions APK Testing & Build Workflow
+
+The repository includes a ready-to-run GitHub Actions workflow (`.github/workflows/apk-build-test.yml`) that automatically tests and builds installable Android APKs.
+
+### How It Works:
+1. **Validation & Test**: Compiles TypeScript, runs project linters, and verifies the web application build.
+2. **Android Setup**: Provisions JDK 21 and the Android SDK on an `ubuntu-latest` runner.
+3. **Unit Testing**: Executes Android unit tests via `./gradlew testDebugUnitTest`.
+4. **APK Compilation**: Assembles `CarLink-Hotspot-Automator-debug.apk` (and unsigned/signed release APKs).
+5. **Artifact Publishing**: Uploads the finished APK and SHA-256 checksums to the GitHub Actions run page with a 30-day retention.
+
+### Triggering the Workflow:
+- **Automatic**: Every `git push` or `pull request` to `main` or `master`, or when a version tag (`v1.0.0`) is pushed.
+- **Manual (Dispatch)**:
+  1. Go to the **Actions** tab in your GitHub repository.
+  2. Select **Test & Build Android APK** from the left sidebar.
+  3. Click **Run workflow**, choose your branch, select your preferred build type (`debug`, `release`, or `both`), and click **Run workflow**.
+  4. Once complete, scroll to the **Artifacts** section at the bottom of the summary page to download `carlink-hotspot-automator-apk.zip`.
+
