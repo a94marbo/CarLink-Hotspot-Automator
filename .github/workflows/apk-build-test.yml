@@ -62,7 +62,7 @@ jobs:
         run: npm run build
 
       - name: Upload compiled web assets
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: web-dist
           path: dist/
@@ -95,7 +95,7 @@ jobs:
           fi
 
       - name: Download compiled web assets
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v7
         with:
           name: web-dist
           path: dist/
@@ -114,7 +114,7 @@ jobs:
         uses: android-actions/setup-android@v4
 
       - name: Setup Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       - name: Make Gradle wrapper executable
         run: chmod +x android/gradlew
@@ -180,7 +180,7 @@ jobs:
 
       # Upload APKs as GitHub Actions Artifacts
       - name: Upload APK Artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: carlink-hotspot-automator-apk
           path: build-artifacts/
@@ -189,7 +189,7 @@ jobs:
       # Upload Test Reports (if available)
       - name: Upload Test Reports
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v6
         with:
           name: android-test-reports
           path: android/app/build/reports/tests/
