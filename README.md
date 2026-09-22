@@ -187,10 +187,14 @@ The repository includes a ready-to-run GitHub Actions workflow (`.github/workflo
 
 ## GitHub CodeQL Security Scanning
 
-The repository includes `.github/workflows/codeql.yml` configured with **CodeQL Advanced Setup**:
+The repository includes `.github/workflows/codeql.yml` configured with **CodeQL Action v4** and **Advanced Setup**:
 - **JavaScript / TypeScript**: Analyzed with fast static parsing (`build-mode: none`).
 - **Java / Android**: Analyzed with full compiler tracking (`build-mode: manual`) via Gradle and the Android SDK. This ensures 100% type and symbol resolution without missing JAR warnings.
 
-> **Note**: In your GitHub repository settings under **Settings** > **Code security and analysis** > **Code scanning**, make sure **Advanced Setup** is selected (which executes `.github/workflows/codeql.yml`) rather than the automatic "Default Setup", which runs in buildless mode and cannot resolve Android SDK dependencies.
+> **Important — If you see "CodeQL analyses from advanced configurations cannot be processed when the default setup is enabled"**:
+> 1. In your GitHub repository, open **Settings** > **Code security and analysis**.
+> 2. Under the **Code scanning** section, look for **CodeQL analysis**.
+> 3. Click the three dots (`...`) next to CodeQL / Default Setup and select **Disable** (or switch to **Advanced**).
+> 4. Once Default Setup is disabled, GitHub will accept and display the results from `.github/workflows/codeql.yml` without rejecting the SARIF file.
 
 
