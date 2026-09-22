@@ -183,3 +183,14 @@ The repository includes a ready-to-run GitHub Actions workflow (`.github/workflo
   3. Click **Run workflow**, choose your branch, select your preferred build type (`debug`, `release`, or `both`), and click **Run workflow**.
   4. Once complete, scroll to the **Artifacts** section at the bottom of the summary page to download `carlink-hotspot-automator-apk.zip`.
 
+---
+
+## GitHub CodeQL Security Scanning
+
+The repository includes `.github/workflows/codeql.yml` configured with **CodeQL Advanced Setup**:
+- **JavaScript / TypeScript**: Analyzed with fast static parsing (`build-mode: none`).
+- **Java / Android**: Analyzed with full compiler tracking (`build-mode: manual`) via Gradle and the Android SDK. This ensures 100% type and symbol resolution without missing JAR warnings.
+
+> **Note**: In your GitHub repository settings under **Settings** > **Code security and analysis** > **Code scanning**, make sure **Advanced Setup** is selected (which executes `.github/workflows/codeql.yml`) rather than the automatic "Default Setup", which runs in buildless mode and cannot resolve Android SDK dependencies.
+
+
