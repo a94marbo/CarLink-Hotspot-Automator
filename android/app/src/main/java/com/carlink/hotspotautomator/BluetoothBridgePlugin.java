@@ -6,10 +6,15 @@ import android.bluetooth.BluetoothClass;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
 import android.bluetooth.BluetoothProfile;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
+import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import androidx.core.app.ActivityCompat;
 
@@ -23,6 +28,7 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
 
+import java.lang.reflect.Method;
 import java.util.Locale;
 import java.util.Set;
 
@@ -36,10 +42,18 @@ import java.util.Set;
         @Permission(
             strings = { Manifest.permission.BLUETOOTH_SCAN },
             alias = "bluetoothScan"
+        ),
+        @Permission(
+            strings = { Manifest.permission.ACCESS_FINE_LOCATION },
+            alias = "location"
         )
     }
 )
 public class BluetoothBridgePlugin extends Plugin {
+
+    private BroadcastReceiver bluetoothReceiver = null;
+    private WifiManager.LocalOnlyHotspotReservation hotspotReservation = null;
+    private boolean isListening = false;
 
     @PluginMethod
     public void getPairedDevices(PluginCall call) {
@@ -270,5 +284,256 @@ public class BluetoothBridgePlugin extends Plugin {
         ret.put("androidRelease", Build.VERSION.RELEASE);
         ret.put("sdkInt", Build.VERSION.SDK_INT);
         call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void startBluetoothMonitor(PluginCall call) {
+        try {
+            if (bluetoothReceiver == null) {
+                bluetoothReceiver = new BroadcastReceiver() {
+                    @Override
+                    public void onReceive(Context context, Intent intent) {
+                        String action = intent.getAction();
+                        if (action == null) return;
+
+                        if (BluetoothDevice.ACTION_ACL_CONNECTED.equals(action) ||
+                            BluetoothDevice.ACTION_ACL_DISCONNECTED.equals(action) ||
+                            BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED.equals(action)) {
+
+                            BluetoothDevice device = null;
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE, BluetoothDevice.class);
+                            } else {
+                                device = intent.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                            }
+
+                            JSObject eventData = new JSObject();
+                            String eventType = BluetoothDevice.ACTION_ACL_CONNECTED.equals(action) ? "connected" : "disconnected";
+                            eventData.put("type", eventType);
+                            eventData.put("action", action);
+
+                            if (device != null) {
+                                String name = null;
+                                try {
+                                    name = device.getName();
+                                } catch (SecurityException ignored) {}
+                                String address = device.getAddress();
+
+                                if (name == null || name.trim().isEmpty()) {
+                                    name = "Bluetooth Device (" + address + ")";
+                                }
+
+                                eventData.put("deviceName", name);
+                                eventData.put("macAddress", address);
+                                eventData.put("deviceId", "BT:" + address);
+                            }
+
+                            notifyListeners("bluetoothStateChange", eventData);
+                        }
+                    }
+                };
+
+                IntentFilter filter = new IntentFilter();
+                filter.addAction(BluetoothDevice.ACTION_ACL_CONNECTED);
+                filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
+                filter.addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED);
+                filter.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
+                getContext().registerReceiver(bluetoothReceiver, filter);
+                isListening = true;
+            }
+
+            JSObject ret = new JSObject();
+            ret.put("success", true);
+            ret.put("listening", true);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("Could not start Bluetooth listener: " + e.getMessage(), e);
+        }
+    }
+
+    @PluginMethod
+    public void stopBluetoothMonitor(PluginCall call) {
+        try {
+            if (bluetoothReceiver != null) {
+                getContext().unregisterReceiver(bluetoothReceiver);
+                bluetoothReceiver = null;
+                isListening = false;
+            }
+            JSObject ret = new JSObject();
+            ret.put("success", true);
+            ret.put("listening", false);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("Could not stop Bluetooth listener: " + e.getMessage(), e);
+        }
+    }
+
+    @PluginMethod
+    public void setHotspotState(PluginCall call) {
+        boolean enable = call.getBoolean("enable", true);
+        Context context = getContext();
+
+        try {
+            WifiManager wifiManager = (WifiManager) context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            if (wifiManager == null) {
+                call.reject("WifiManager is not available.");
+                return;
+            }
+
+            if (enable) {
+                // Try LocalOnlyHotspot on Android 8.0+ (API 26+)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    if (ActivityCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+                        requestPermissionForAlias("location", call, "locationHotspotPermissionCallback");
+                        return;
+                    }
+
+                    if (hotspotReservation != null) {
+                        JSObject ret = new JSObject();
+                        ret.put("success", true);
+                        ret.put("status", "already_active");
+                        ret.put("method", "LocalOnlyHotspot");
+                        call.resolve(ret);
+                        return;
+                    }
+
+                    wifiManager.startLocalOnlyHotspot(new WifiManager.LocalOnlyHotspotCallback() {
+                        @Override
+                        public void onStarted(WifiManager.LocalOnlyHotspotReservation reservation) {
+                            super.onStarted(reservation);
+                            hotspotReservation = reservation;
+                            JSObject ret = new JSObject();
+                            ret.put("success", true);
+                            ret.put("status", "active");
+                            ret.put("method", "LocalOnlyHotspot");
+                            try {
+                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                                    android.net.wifi.SoftApConfiguration config = reservation.getSoftApConfiguration();
+                                    if (config != null) {
+                                        ret.put("ssid", config.getSsid());
+                                        ret.put("passphrase", config.getPassphrase());
+                                    }
+                                }
+                            } catch (Exception ignored) {}
+                            call.resolve(ret);
+
+                            JSObject eventData = new JSObject();
+                            eventData.put("status", "active");
+                            notifyListeners("hotspotStatusChange", eventData);
+                        }
+
+                        @Override
+                        public void onStopped() {
+                            super.onStopped();
+                            hotspotReservation = null;
+                            JSObject eventData = new JSObject();
+                            eventData.put("status", "stopped");
+                            notifyListeners("hotspotStatusChange", eventData);
+                        }
+
+                        @Override
+                        public void onFailed(int reason) {
+                            super.onFailed(reason);
+                            hotspotReservation = null;
+                            // Fallback to launching system tethering settings so user can toggle in 1 click
+                            tryLaunchTetherSettings();
+                            JSObject ret = new JSObject();
+                            ret.put("success", false);
+                            ret.put("status", "settings_opened");
+                            ret.put("reason", reason);
+                            ret.put("message", "Android system restricted direct toggle; opened Hotspot Settings.");
+                            call.resolve(ret);
+                        }
+                    }, new Handler(Looper.getMainLooper()));
+                    return;
+                } else {
+                    // Pre-Oreo legacy reflection
+                    try {
+                        Method method = wifiManager.getClass().getMethod("setWifiApEnabled", android.net.wifi.WifiConfiguration.class, boolean.class);
+                        method.invoke(wifiManager, null, true);
+                        JSObject ret = new JSObject();
+                        ret.put("success", true);
+                        ret.put("status", "active");
+                        call.resolve(ret);
+                        return;
+                    } catch (Exception ignored) {}
+                }
+            } else {
+                // Disable hotspot
+                if (hotspotReservation != null) {
+                    hotspotReservation.close();
+                    hotspotReservation = null;
+                }
+
+                // Try reflection for legacy tethering
+                try {
+                    Method method = wifiManager.getClass().getMethod("setWifiApEnabled", android.net.wifi.WifiConfiguration.class, boolean.class);
+                    method.invoke(wifiManager, null, false);
+                } catch (Exception ignored) {}
+
+                JSObject ret = new JSObject();
+                ret.put("success", true);
+                ret.put("status", "off");
+                call.resolve(ret);
+
+                JSObject eventData = new JSObject();
+                eventData.put("status", "off");
+                notifyListeners("hotspotStatusChange", eventData);
+                return;
+            }
+
+            // If direct activation could not be handled by API, open settings intent
+            tryLaunchTetherSettings();
+            JSObject ret = new JSObject();
+            ret.put("success", true);
+            ret.put("status", "settings_opened");
+            ret.put("message", "Hotspot settings opened");
+            call.resolve(ret);
+
+        } catch (Exception e) {
+            tryLaunchTetherSettings();
+            JSObject ret = new JSObject();
+            ret.put("success", false);
+            ret.put("status", "settings_opened");
+            ret.put("error", e.getMessage());
+            call.resolve(ret);
+        }
+    }
+
+    @PermissionCallback
+    private void locationHotspotPermissionCallback(PluginCall call) {
+        setHotspotState(call);
+    }
+
+    private void tryLaunchTetherSettings() {
+        try {
+            Intent intent = new Intent();
+            intent.setAction("android.settings.TETHER_SETTINGS");
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            if (intent.resolveActivity(getContext().getPackageManager()) != null) {
+                getContext().startActivity(intent);
+            } else {
+                Intent fallback = new Intent(Settings.ACTION_WIRELESS_SETTINGS);
+                fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                getContext().startActivity(fallback);
+            }
+        } catch (Exception ignored) {}
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        super.handleOnDestroy();
+        if (bluetoothReceiver != null) {
+            try {
+                getContext().unregisterReceiver(bluetoothReceiver);
+            } catch (Exception ignored) {}
+            bluetoothReceiver = null;
+        }
+        if (hotspotReservation != null) {
+            try {
+                hotspotReservation.close();
+            } catch (Exception ignored) {}
+            hotspotReservation = null;
+        }
     }
 }

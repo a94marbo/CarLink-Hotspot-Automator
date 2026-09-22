@@ -1,4 +1,4 @@
-import { Wifi, WifiOff, Car, Clock, ShieldCheck, Smartphone, Zap, RotateCcw, FastForward, CheckCircle2 } from 'lucide-react';
+import { Wifi, WifiOff, Car, Clock, ShieldCheck, Smartphone, Zap, RotateCcw, FastForward, CheckCircle2, Settings as SettingsIcon } from 'lucide-react';
 import { HotspotState, AppSettings } from '../types';
 
 interface HotspotStatusCardProps {
@@ -9,6 +9,7 @@ interface HotspotStatusCardProps {
   onCancelCountdown: () => void;
   onFastForwardCountdown: () => void;
   onEditTimers?: () => void;
+  onOpenHotspotSettings?: () => void;
 }
 
 export function HotspotStatusCard({
@@ -19,6 +20,7 @@ export function HotspotStatusCard({
   onCancelCountdown,
   onFastForwardCountdown,
   onEditTimers,
+  onOpenHotspotSettings,
 }: HotspotStatusCardProps) {
   const { status, countdownRemaining, countdownTotal, triggeredDeviceName, ssid, band, connectedClients } = hotspotState;
 
@@ -117,7 +119,19 @@ export function HotspotStatusCard({
           </div>
 
           {/* Action buttons */}
-          <div className="flex items-center gap-2 self-end sm:self-center">
+          <div className="flex items-center gap-2 self-end sm:self-center flex-wrap justify-end">
+            {onOpenHotspotSettings && (
+              <button
+                id="btn-open-hotspot-settings"
+                onClick={onOpenHotspotSettings}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-white text-slate-700 border border-slate-300 hover:bg-slate-50 transition-colors shadow-xs"
+                title="Open Phone Hotspot & Tethering Settings directly"
+              >
+                <SettingsIcon className="w-3.5 h-3.5 text-slate-500" />
+                <span>Hotspot Settings</span>
+              </button>
+            )}
+
             {status === 'off' && (
               <button
                 id="btn-hotspot-force-on"

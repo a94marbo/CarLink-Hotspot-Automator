@@ -29,12 +29,41 @@ export interface PairedDevicesResult {
   permissionDenied?: boolean;
 }
 
+export interface BluetoothStateChangeEvent {
+  type: 'connected' | 'disconnected';
+  action: string;
+  deviceName?: string;
+  macAddress?: string;
+  deviceId?: string;
+}
+
+export interface HotspotToggleResult {
+  success: boolean;
+  status: 'active' | 'off' | 'settings_opened' | 'already_active';
+  method?: string;
+  ssid?: string;
+  passphrase?: string;
+  message?: string;
+  error?: string;
+}
+
 export interface BluetoothBridgePluginInterface {
   getPairedDevices(): Promise<PairedDevicesResult>;
   isBluetoothEnabled(): Promise<{ supported: boolean; enabled: boolean }>;
   openBluetoothSettings(): Promise<{ success: boolean }>;
   openHotspotSettings(): Promise<{ success: boolean }>;
   isNativePlatform(): Promise<{ isNative: boolean; platform: string; androidRelease?: string; sdkInt?: number }>;
+  startBluetoothMonitor(): Promise<{ success: boolean; listening: boolean }>;
+  stopBluetoothMonitor(): Promise<{ success: boolean; listening: boolean }>;
+  setHotspotState(options: { enable: boolean }): Promise<HotspotToggleResult>;
+  addListener(
+    eventName: 'bluetoothStateChange',
+    listenerFunc: (event: BluetoothStateChangeEvent) => void
+  ): Promise<{ remove: () => Promise<void> }>;
+  addListener(
+    eventName: 'hotspotStatusChange',
+    listenerFunc: (event: { status: string }) => void
+  ): Promise<{ remove: () => Promise<void> }>;
 }
 
 export const BluetoothBridge = registerPlugin<BluetoothBridgePluginInterface>('BluetoothBridge');
@@ -225,3 +254,58 @@ export async function openPhoneHotspotSettings(): Promise<boolean> {
   }
   return false;
 }
+
+/**
+ * Start listening for real-time Bluetooth connection & disconnection events on Android
+ */
+export async function startNativeBluetoothMonitoring(
+  onEvent: (event: BluetoothStateChangeEvent) => void
+): Promise<(() => void) | null> {
+  if (!isNativeApp()) {
+    return null;
+  }
+
+  try {
+    const handle = await BluetoothBridge.addListener('bluetoothStateChange', (event) => {
+      onEvent(event);
+    });
+    await BluetoothBridge.startBluetoothMonitor();
+    return () => {
+      handle.remove();
+      BluetoothBridge.stopBluetoothMonitor().catch(() => {});
+    };
+  } catch (err) {
+    console.warn('Failed to start native Bluetooth monitor:', err);
+    return null;
+  }
+}
+
+/**
+ * Turn phone Wi-Fi hotspot ON or OFF natively on Android
+ */
+export async function triggerNativeHotspot(enable: boolean): Promise<HotspotToggleResult> {
+  if (isNativeApp()) {
+    try {
+      const result = await BluetoothBridge.setHotspotState({ enable });
+      return result;
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn('Failed to trigger native hotspot:', err);
+      // Fall back to opening settings so user can toggle immediately
+      await openPhoneHotspotSettings();
+      return {
+        success: false,
+        status: 'settings_opened',
+        error: msg,
+        message: 'Could not toggle hotspot directly, opened Hotspot settings.',
+      };
+    }
+  }
+
+  return {
+    success: true,
+    status: enable ? 'active' : 'off',
+    message: 'Web preview simulation',
+  };
+}
+
