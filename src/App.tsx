@@ -14,6 +14,7 @@ import { ActivityLogView } from './components/ActivityLogView';
 import { SettingsModal } from './components/SettingsModal';
 import { PlatformGuideModal } from './components/PlatformGuideModal';
 import { TimerConfigCard } from './components/TimerConfigCard';
+import { AndroidHotspotModal } from './components/AndroidHotspotModal';
 import { Sparkles, Car, ShieldCheck, Zap, Info } from 'lucide-react';
 import { 
   fetchPhonePairedDevices, 
@@ -22,6 +23,12 @@ import {
   openPhoneHotspotSettings,
   startNativeBluetoothMonitoring,
   triggerNativeHotspot,
+  queryNativeHotspotState,
+  listenToNativeHotspotState,
+  queryNativeConnectedClients,
+  checkDeviceRootAccess,
+  isCarDevice,
+  detectCarBrand,
   BluetoothStateChangeEvent
 } from './utils/bluetoothNative';
 
@@ -119,6 +126,18 @@ export default function App() {
   const [showSimulator, setShowSimulator] = useState(false);
   const [isScanning, setIsScanning] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [isRooted, setIsRooted] = useState(false);
+  const [showAndroidModal, setShowAndroidModal] = useState(false);
+
+  // Synchronized refs to avoid stale closure issues in native broadcast handlers
+  const devicesRef = useRef(devices);
+  devicesRef.current = devices;
+
+  const settingsRef = useRef(settings);
+  settingsRef.current = settings;
+
+  const hotspotStateRef = useRef(hotspotState);
+  hotspotStateRef.current = hotspotState;
 
   // Sync state to local storage
   useEffect(() => {
@@ -176,7 +195,19 @@ export default function App() {
         if (prev.status === 'connecting_delay') {
           if (prev.countdownRemaining <= 1) {
             // Trigger real native Android hotspot activation
-            triggerNativeHotspot(true).catch(err => {
+            triggerNativeHotspot(true).then((res) => {
+              if (res.isRooted && res.method === 'root') {
+                addLog('hotspot_on', 'Root Auto-Tether Enabled', 'Root privileges detected: Wi-Fi Hotspot turned ON automatically.', 'success', prev.triggeredDeviceName);
+              } else if (res.status === 'settings_opened') {
+                addLog(
+                  'hotspot_on',
+                  'Hotspot Settings Opened (1-Tap Mode)',
+                  'Android security requires 1-tap confirmation or root to toggle hotspot. Hotspot settings opened.',
+                  'warning',
+                  prev.triggeredDeviceName
+                );
+              }
+            }).catch(err => {
               console.warn('Native hotspot turn on error:', err);
             });
 
@@ -202,11 +233,11 @@ export default function App() {
               connectedClients: [
                 {
                   id: 'client-car',
-                  name: prev.triggeredDeviceName ? `${prev.triggeredDeviceName} (Nav)` : 'Car Infotainment',
+                  name: prev.triggeredDeviceName ? `${prev.triggeredDeviceName} (Vehicle)` : 'Vehicle Infotainment',
                   ip: '192.168.43.15',
                   mac: '8C:85:90:4B:92:FE',
                   connectedAt: Date.now(),
-                  dataUsageMb: 12.4,
+                  dataUsageMb: 0.1,
                 },
               ],
             };
@@ -280,67 +311,121 @@ export default function App() {
   };
 
   // Handle Bluetooth device connect/disconnect event (from UI simulator, test button, or real native ACL broadcast)
-  const handleToggleConnection = (identifier: string, forceState?: boolean) => {
-    // Lookup by id or by MAC address
-    const target = devices.find(d => d.id === identifier || d.macAddress === identifier);
+  const handleToggleConnection = (identifierOrTarget: string | BluetoothDevice, forceState?: boolean) => {
+    let target: BluetoothDevice | undefined;
+    if (typeof identifierOrTarget === 'object' && identifierOrTarget !== null) {
+      target = identifierOrTarget;
+    } else {
+      const idLower = identifierOrTarget.trim().toLowerCase();
+      target = devicesRef.current.find(d => 
+        d.id.toLowerCase() === idLower || 
+        (d.macAddress && d.macAddress.toLowerCase() === idLower) ||
+        d.name.toLowerCase() === idLower
+      );
+    }
     if (!target) return;
 
     const shouldConnect = forceState !== undefined ? forceState : !target.isConnected;
+    const currentSettings = settingsRef.current;
+    const currentHotspot = hotspotStateRef.current;
 
     if (shouldConnect) {
-      // Connecting
-      setDevices(prev => prev.map(d => (d.id === target.id || d.macAddress === target.macAddress ? { ...d, isConnected: true, lastConnectedAt: Date.now() } : d)));
-      if (settings.soundAlerts) playChime('device_connected');
+      // Mark as connected
+      setDevices(prev => prev.map(d => (d.id === target!.id || (target!.macAddress && d.macAddress === target!.macAddress) ? { ...d, isConnected: true, lastConnectedAt: Date.now() } : d)));
+      if (currentSettings.soundAlerts) playChime('device_connected');
 
       addLog(
         'bluetooth_connect',
         `Bluetooth Connected: ${target.name}`,
-        `Device handshake confirmed. ${target.isTriggerEnabled ? `Armed for ${settings.connectDelaySeconds}s hotspot activation.` : 'Not configured as trigger.'}`,
+        `Device handshake confirmed. ${target.isTriggerEnabled ? `Armed for ${currentSettings.connectDelaySeconds}s hotspot activation.` : 'Not configured as trigger.'}`,
         'info',
         target.name
       );
 
       if (target.isTriggerEnabled) {
         // If we were in the middle of a shutdown timer, cancel it!
-        if (hotspotState.status === 'disconnecting_delay' && settings.autoCancelIfReconnected) {
+        if (currentHotspot.status === 'disconnecting_delay' && currentSettings.autoCancelIfReconnected) {
           setHotspotState(prev => ({
             ...prev,
             status: 'active',
             countdownRemaining: 0,
             countdownTotal: 0,
-            triggeredDeviceId: target.id,
-            triggeredDeviceName: target.name,
+            triggeredDeviceId: target!.id,
+            triggeredDeviceName: target!.name,
           }));
           addLog(
             'countdown_cancelled',
             'Disconnect Grace Timer Cancelled',
-            `Car "${target.name}" reconnected during the ${settings.disconnectDelayMinutes}-minute grace window. Hotspot remains ACTIVE.`,
+            `Car "${target.name}" reconnected during the ${currentSettings.disconnectDelayMinutes}-minute grace window. Hotspot remains ACTIVE.`,
             'success',
             target.name
           );
-        } else if (hotspotState.status === 'off') {
-          // Start the connect delay timer
-          setHotspotState(prev => ({
-            ...prev,
-            status: 'connecting_delay',
-            countdownRemaining: settings.connectDelaySeconds,
-            countdownTotal: settings.connectDelaySeconds,
-            triggeredDeviceId: target.id,
-            triggeredDeviceName: target.name,
-          }));
-          addLog(
-            'countdown_started',
-            `${settings.connectDelaySeconds}-Second Activation Delay Started`,
-            `Car "${target.name}" connected. Starting ${settings.connectDelaySeconds}s countdown before turning on hotspot.`,
-            'warning',
-            target.name
-          );
+        } else if (currentHotspot.status === 'off') {
+          if (currentSettings.connectDelaySeconds === 0) {
+            // Instant trigger without delay
+            triggerNativeHotspot(true).then((res) => {
+              if (res.isRooted && res.method === 'root') {
+                addLog('hotspot_on', 'Root Auto-Tether Enabled', 'Root privileges detected: Wi-Fi Hotspot turned ON automatically.', 'success', target!.name);
+              } else if (res.status === 'settings_opened') {
+                addLog('hotspot_on', 'Hotspot Settings Opened (1-Tap Mode)', 'Android security requires 1-tap confirmation or root to toggle hotspot. Hotspot settings opened.', 'warning', target!.name);
+              }
+            });
+
+            if (currentSettings.soundAlerts) playChime('hotspot_on');
+            if (currentSettings.vibrateAlerts && navigator.vibrate) navigator.vibrate([100, 50, 100]);
+
+            setHotspotState(prev => ({
+              ...prev,
+              status: 'active',
+              countdownRemaining: 0,
+              countdownTotal: 0,
+              activeSince: Date.now(),
+              clientCount: 1,
+              connectedClients: [
+                {
+                  id: 'client-car',
+                  name: `${target!.name} (Vehicle)`,
+                  ip: '192.168.43.15',
+                  mac: target!.macAddress || '8C:85:90:4B:92:FE',
+                  connectedAt: Date.now(),
+                  dataUsageMb: 0.1,
+                },
+              ],
+              triggeredDeviceId: target!.id,
+              triggeredDeviceName: target!.name,
+            }));
+
+            addLog(
+              'hotspot_on',
+              'Wi-Fi Hotspot Turned ON',
+              `Car "${target.name}" connected. Hotspot activated instantly.`,
+              'success',
+              target.name
+            );
+          } else {
+            // Start the connect delay timer
+            setHotspotState(prev => ({
+              ...prev,
+              status: 'connecting_delay',
+              countdownRemaining: currentSettings.connectDelaySeconds,
+              countdownTotal: currentSettings.connectDelaySeconds,
+              triggeredDeviceId: target!.id,
+              triggeredDeviceName: target!.name,
+            }));
+            addLog(
+              'countdown_started',
+              `${currentSettings.connectDelaySeconds}-Second Activation Delay Started`,
+              `Car "${target.name}" connected. Starting ${currentSettings.connectDelaySeconds}s countdown before turning on hotspot.`,
+              'warning',
+              target.name
+            );
+          }
         }
       }
     } else {
       // Disconnecting
-      setDevices(prev => prev.map(d => (d.id === target.id || d.macAddress === target.macAddress ? { ...d, isConnected: false } : d)));
-      if (settings.soundAlerts) playChime('device_disconnected');
+      setDevices(prev => prev.map(d => (d.id === target!.id || (target!.macAddress && d.macAddress === target!.macAddress) ? { ...d, isConnected: false } : d)));
+      if (currentSettings.soundAlerts) playChime('device_disconnected');
 
       addLog(
         'bluetooth_disconnect',
@@ -351,10 +436,10 @@ export default function App() {
       );
 
       // Check if any other trigger device is still connected
-      const otherTriggerConnected = devices.some(d => (d.id !== target.id && d.macAddress !== target.macAddress) && d.isTriggerEnabled && d.isConnected);
+      const otherTriggerConnected = devicesRef.current.some(d => (d.id !== target!.id && d.macAddress !== target!.macAddress) && d.isTriggerEnabled && d.isConnected);
 
       if (!otherTriggerConnected && target.isTriggerEnabled) {
-        if (hotspotState.status === 'connecting_delay') {
+        if (currentHotspot.status === 'connecting_delay') {
           // Abort turn-on if disconnected before buffer finished
           setHotspotState(prev => ({
             ...prev,
@@ -367,13 +452,13 @@ export default function App() {
           addLog(
             'countdown_cancelled',
             'Activation Aborted',
-            `Car disconnected before the ${settings.connectDelaySeconds}s buffer finished. Hotspot was not turned on.`,
+            `Car disconnected before the ${currentSettings.connectDelaySeconds}s buffer finished. Hotspot was not turned on.`,
             'warning',
             target.name
           );
-        } else if (hotspotState.status === 'active') {
+        } else if (currentHotspot.status === 'active') {
           // Start disconnect countdown
-          const totalSec = settings.disconnectDelayMinutes * 60;
+          const totalSec = currentSettings.disconnectDelayMinutes * 60;
           setHotspotState(prev => ({
             ...prev,
             status: 'disconnecting_delay',
@@ -382,8 +467,8 @@ export default function App() {
           }));
           addLog(
             'countdown_started',
-            `${settings.disconnectDelayMinutes}-Minute Auto-Off Countdown Initiated`,
-            `Car disconnected. Hotspot will shut down in ${settings.disconnectDelayMinutes} minutes to save phone battery unless reconnected.`,
+            `${currentSettings.disconnectDelayMinutes}-Minute Auto-Off Countdown Initiated`,
+            `Car disconnected. Hotspot will shut down in ${currentSettings.disconnectDelayMinutes} minutes to save phone battery unless reconnected.`,
             'warning',
             target.name
           );
@@ -466,65 +551,120 @@ export default function App() {
       return;
     }
 
+    let cleanupBt: (() => void) | null = null;
+    let cleanupHs: (() => void) | null = null;
+    let isMounted = true;
+
     // 1. Initial bonded paired device scan
     handleFetchPairedDevices();
 
-    // 2. Start real-time native Bluetooth ACL connection broadcast monitor
-    let cleanupFn: (() => void) | null = null;
-    let isMounted = true;
+    // 2. Query device root access status
+    checkDeviceRootAccess().then(rooted => {
+      if (isMounted) setIsRooted(rooted);
+    });
 
+    // 3. Query initial native Wi-Fi AP state from Android
+    queryNativeHotspotState().then(hs => {
+      if (!isMounted) return;
+      if (hs.enabled && hotspotStateRef.current.status === 'off') {
+        setHotspotState(prev => ({
+          ...prev,
+          status: 'active',
+          activeSince: prev.activeSince || Date.now(),
+          clientCount: Math.max(prev.clientCount, 1),
+        }));
+      }
+    });
+
+    // 4. Listen for real-time Android system hotspot state changes (WIFI_AP_STATE_CHANGED)
+    listenToNativeHotspotState((ev) => {
+      if (!isMounted) return;
+      if (ev.isActive) {
+        setHotspotState(prev => {
+          if (prev.status === 'active') return prev;
+          return {
+            ...prev,
+            status: 'active',
+            countdownRemaining: 0,
+            countdownTotal: 0,
+            activeSince: prev.activeSince || Date.now(),
+            clientCount: Math.max(prev.clientCount, 1),
+            connectedClients: prev.triggeredDeviceName ? [
+              {
+                id: 'client-car',
+                name: `${prev.triggeredDeviceName} (Vehicle)`,
+                ip: '192.168.43.15',
+                mac: '8C:85:90:4B:92:FE',
+                connectedAt: Date.now(),
+                dataUsageMb: 0.1,
+              }
+            ] : prev.connectedClients,
+          };
+        });
+        addLog('hotspot_on', 'Android Hotspot Active', 'Wi-Fi Hotspot is broadcasting SSID.', 'success');
+      } else if (ev.status === 'off') {
+        setHotspotState(prev => {
+          if (prev.status === 'off') return prev;
+          return {
+            ...prev,
+            status: 'off',
+            countdownRemaining: 0,
+            countdownTotal: 0,
+            clientCount: 0,
+            connectedClients: [],
+          };
+        });
+        addLog('hotspot_off', 'Android Hotspot Turned OFF', 'Wi-Fi Hotspot has been powered down.', 'info');
+      }
+    }).then(cleanup => {
+      cleanupHs = cleanup;
+    });
+
+    // 5. Start real-time native Bluetooth ACL connection broadcast monitor
     startNativeBluetoothMonitoring((event: BluetoothStateChangeEvent) => {
       if (!isMounted) return;
       const isConnected = event.type === 'connected';
       const devName = event.deviceName || 'Vehicle Infotainment';
-      const mac = event.macAddress || '';
+      const mac = (event.macAddress || '').trim();
+      const macLower = mac.toLowerCase();
+      const devNameLower = devName.toLowerCase();
 
-      // Check if device is in our list, if not auto-register it
-      setDevices(prev => {
-        const existingIdx = prev.findIndex(d => (mac && d.macAddress === mac) || d.name === devName);
-        if (existingIdx >= 0) {
-          const current = prev[existingIdx];
-          // If already in that state, keep
-          if (current.isConnected === isConnected) return prev;
+      // Look up target device in current devices
+      let target = devicesRef.current.find(d => 
+        (macLower && d.macAddress?.toLowerCase() === macLower) ||
+        (devNameLower && d.name?.toLowerCase() === devNameLower) ||
+        (event.deviceId && d.id === event.deviceId)
+      );
 
-          const updated = [...prev];
-          updated[existingIdx] = {
-            ...current,
-            isConnected,
-            lastConnectedAt: isConnected ? Date.now() : current.lastConnectedAt,
-          };
-          return updated;
-        } else if (isConnected) {
-          // New device detected in real-time
-          const newDev: BluetoothDevice = {
-            id: `dev-auto-${mac.replace(/:/g, '') || Date.now()}`,
-            name: devName,
-            macAddress: mac || '00:00:00:00:00:00',
-            type: 'car',
-            carBrand: 'Detected Vehicle',
-            isConnected: true,
-            isTriggerEnabled: true,
-            isRealNativeDevice: true,
-            lastConnectedAt: Date.now(),
-          };
-          return [newDev, ...prev];
-        }
-        return prev;
-      });
+      if (!target) {
+        // Auto-register detected Bluetooth vehicle
+        const isCar = isCarDevice(devName);
+        target = {
+          id: event.deviceId || `dev-auto-${macLower.replace(/:/g, '') || Date.now()}`,
+          name: devName,
+          macAddress: mac || '00:00:00:00:00:00',
+          type: isCar ? 'car' : 'other',
+          carBrand: detectCarBrand(devName) || 'Detected Vehicle',
+          isConnected: isConnected,
+          isTriggerEnabled: true,
+          isRealNativeDevice: true,
+          lastConnectedAt: isConnected ? Date.now() : undefined,
+        };
+        setDevices(prev => [target!, ...prev.filter(d => d.id !== target!.id)]);
+      }
 
-      // Pass event into automator logic
-      handleToggleConnection(mac || devName, isConnected);
+      // Trigger automation logic with exact target
+      handleToggleConnection(target, isConnected);
     }).then(cleanup => {
-      cleanupFn = cleanup;
+      cleanupBt = cleanup;
     }).catch(err => {
       console.warn('Native Bluetooth monitor error:', err);
     });
 
     return () => {
       isMounted = false;
-      if (cleanupFn) {
-        cleanupFn();
-      }
+      if (cleanupBt) cleanupBt();
+      if (cleanupHs) cleanupHs();
     };
   }, []);
 
@@ -767,6 +907,8 @@ export default function App() {
           onFastForwardCountdown={handleFastForwardCountdown}
           onEditTimers={() => setShowSettings(true)}
           onOpenHotspotSettings={isNativeApp() ? openPhoneHotspotSettings : undefined}
+          isRooted={isRooted}
+          onShowAndroidHelp={() => setShowAndroidModal(true)}
         />
 
         {/* Dedicated Delay Buffer & Disconnect Grace Period Configurator */}
@@ -886,6 +1028,14 @@ export default function App() {
           onClose={() => setShowGuide(false)}
         />
       )}
+
+      {/* Android Hotspot & Root Security Guide Modal */}
+      <AndroidHotspotModal
+        isOpen={showAndroidModal}
+        onClose={() => setShowAndroidModal(false)}
+        isRooted={isRooted}
+        onOpenSettings={openPhoneHotspotSettings}
+      />
     </div>
   );
 }

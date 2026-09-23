@@ -45,6 +45,14 @@ export interface HotspotToggleResult {
   passphrase?: string;
   message?: string;
   error?: string;
+  isProtectedByAndroid?: boolean;
+  isRooted?: boolean;
+}
+
+export interface HotspotNativeStatusEvent {
+  isActive: boolean;
+  status: 'active' | 'off' | 'enabling' | 'disabling';
+  stateCode?: number;
 }
 
 export interface BluetoothBridgePluginInterface {
@@ -52,7 +60,28 @@ export interface BluetoothBridgePluginInterface {
   isBluetoothEnabled(): Promise<{ supported: boolean; enabled: boolean }>;
   openBluetoothSettings(): Promise<{ success: boolean }>;
   openHotspotSettings(): Promise<{ success: boolean }>;
-  isNativePlatform(): Promise<{ isNative: boolean; platform: string; androidRelease?: string; sdkInt?: number }>;
+  isNativePlatform(): Promise<{
+    isNative: boolean;
+    platform: string;
+    androidRelease?: string;
+    sdkInt?: number;
+    isProtectedByAndroid?: boolean;
+    isRooted?: boolean;
+  }>;
+  checkRootStatus(): Promise<{ isRooted: boolean; isProtectedByAndroid: boolean }>;
+  getHotspotState(): Promise<{
+    supported: boolean;
+    enabled: boolean;
+    status: 'active' | 'off';
+    stateCode: number;
+    isProtectedByAndroid: boolean;
+    isRooted: boolean;
+  }>;
+  getConnectedClients(): Promise<{
+    count: number;
+    clients: Array<{ id: string; ip: string; mac: string; name: string; connectedAt: number; dataUsageMb: number }>;
+    arpAccessible: boolean;
+  }>;
   startBluetoothMonitor(): Promise<{ success: boolean; listening: boolean }>;
   stopBluetoothMonitor(): Promise<{ success: boolean; listening: boolean }>;
   setHotspotState(options: { enable: boolean }): Promise<HotspotToggleResult>;
@@ -63,6 +92,10 @@ export interface BluetoothBridgePluginInterface {
   addListener(
     eventName: 'hotspotStatusChange',
     listenerFunc: (event: { status: string }) => void
+  ): Promise<{ remove: () => Promise<void> }>;
+  addListener(
+    eventName: 'hotspotNativeStatusChange',
+    listenerFunc: (event: HotspotNativeStatusEvent) => void
   ): Promise<{ remove: () => Promise<void> }>;
 }
 
@@ -307,5 +340,99 @@ export async function triggerNativeHotspot(enable: boolean): Promise<HotspotTogg
     status: enable ? 'active' : 'off',
     message: 'Web preview simulation',
   };
+}
+
+/**
+ * Query current hardware Wi-Fi AP state from Android
+ */
+export async function queryNativeHotspotState(): Promise<{
+  supported: boolean;
+  enabled: boolean;
+  status: 'active' | 'off';
+  isProtectedByAndroid: boolean;
+  isRooted: boolean;
+}> {
+  if (isNativeApp()) {
+    try {
+      const res = await BluetoothBridge.getHotspotState();
+      return {
+        supported: res.supported,
+        enabled: res.enabled,
+        status: res.enabled ? 'active' : 'off',
+        isProtectedByAndroid: !!res.isProtectedByAndroid,
+        isRooted: !!res.isRooted,
+      };
+    } catch (e) {
+      console.debug('Native hotspot state query:', e);
+    }
+  }
+  return {
+    supported: false,
+    enabled: false,
+    status: 'off',
+    isProtectedByAndroid: true,
+    isRooted: false,
+  };
+}
+
+/**
+ * Listen for native Android Wi-Fi AP state changes (e.g. user toggles in Android settings, Quick Settings, or routine)
+ */
+export async function listenToNativeHotspotState(
+  onChange: (event: HotspotNativeStatusEvent) => void
+): Promise<(() => void) | null> {
+  if (!isNativeApp()) {
+    return null;
+  }
+  try {
+    const handle = await BluetoothBridge.addListener('hotspotNativeStatusChange', (ev) => {
+      onChange(ev);
+    });
+    return () => {
+      handle.remove();
+    };
+  } catch (err) {
+    console.debug('Could not add hotspotNativeStatusChange listener:', err);
+    return null;
+  }
+}
+
+/**
+ * Inspect connected Wi-Fi clients from Android (/proc/net/arp or internal list)
+ */
+export async function queryNativeConnectedClients(): Promise<Array<{
+  id: string;
+  ip: string;
+  mac: string;
+  name: string;
+  connectedAt: number;
+  dataUsageMb: number;
+}>> {
+  if (isNativeApp()) {
+    try {
+      const res = await BluetoothBridge.getConnectedClients();
+      if (res && res.clients) {
+        return res.clients;
+      }
+    } catch (e) {
+      console.debug('Failed to query ARP clients:', e);
+    }
+  }
+  return [];
+}
+
+/**
+ * Check if the device is rooted (Magisk / KernelSU / su binary)
+ */
+export async function checkDeviceRootAccess(): Promise<boolean> {
+  if (isNativeApp()) {
+    try {
+      const res = await BluetoothBridge.checkRootStatus();
+      return !!res.isRooted;
+    } catch (e) {
+      console.debug('Root check failed:', e);
+    }
+  }
+  return false;
 }
 

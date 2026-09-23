@@ -1,4 +1,4 @@
-import { Wifi, WifiOff, Car, Clock, ShieldCheck, Smartphone, Zap, RotateCcw, FastForward, CheckCircle2, Settings as SettingsIcon } from 'lucide-react';
+import { Wifi, WifiOff, Car, Clock, ShieldCheck, Smartphone, Zap, RotateCcw, FastForward, CheckCircle2, Settings as SettingsIcon, HelpCircle, ShieldAlert, Cpu } from 'lucide-react';
 import { HotspotState, AppSettings } from '../types';
 
 interface HotspotStatusCardProps {
@@ -10,6 +10,8 @@ interface HotspotStatusCardProps {
   onFastForwardCountdown: () => void;
   onEditTimers?: () => void;
   onOpenHotspotSettings?: () => void;
+  isRooted?: boolean;
+  onShowAndroidHelp?: () => void;
 }
 
 export function HotspotStatusCard({
@@ -21,6 +23,8 @@ export function HotspotStatusCard({
   onFastForwardCountdown,
   onEditTimers,
   onOpenHotspotSettings,
+  isRooted = false,
+  onShowAndroidHelp,
 }: HotspotStatusCardProps) {
   const { status, countdownRemaining, countdownTotal, triggeredDeviceName, ssid, band, connectedClients } = hotspotState;
 
@@ -223,6 +227,42 @@ export function HotspotStatusCard({
         )}
       </div>
 
+      {/* Android Automation & Hotspot Protection Banner */}
+      <div className="px-5 py-2.5 bg-slate-50 border-b border-slate-200/80 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div className="flex items-center gap-2">
+          <span className="flex items-center gap-1 font-medium text-slate-700">
+            <Cpu className="w-3.5 h-3.5 text-slate-500" />
+            <span>Hotspot Mode:</span>
+          </span>
+          <span className={`px-2 py-0.5 rounded-md font-semibold text-[11px] ${
+            isRooted
+              ? 'bg-emerald-100 text-emerald-800'
+              : 'bg-blue-100 text-blue-800'
+          }`}>
+            {isRooted ? '✓ Root Auto-Toggle (0-Tap)' : '1-Tap Assist / Routine Mode'}
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {onOpenHotspotSettings && (
+            <button
+              onClick={onOpenHotspotSettings}
+              className="text-[11px] font-semibold text-slate-600 hover:text-slate-900 underline flex items-center gap-1"
+            >
+              Hotspot Settings
+            </button>
+          )}
+          {onShowAndroidHelp && (
+            <button
+              onClick={onShowAndroidHelp}
+              className="text-[11px] font-semibold text-blue-600 hover:text-blue-800 flex items-center gap-1 bg-blue-50 px-2 py-0.5 rounded-md border border-blue-200/60 cursor-pointer"
+            >
+              <HelpCircle className="w-3 h-3" /> Android &amp; Root FAQ
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Grid of details: SSID, Band, Car connection, Battery impact */}
       <div className="grid grid-cols-2 md:grid-cols-4 divide-y md:divide-y-0 md:divide-x divide-slate-100 text-slate-800 bg-white">
         <div className="p-4 flex items-center gap-3">
@@ -251,21 +291,32 @@ export function HotspotStatusCard({
           </div>
         </div>
 
-        <div className="p-4 flex items-center gap-3">
+        <div 
+          onClick={onShowAndroidHelp}
+          className={`p-4 flex items-center gap-3 transition-colors ${onShowAndroidHelp ? 'cursor-pointer hover:bg-indigo-50/40' : ''}`}
+          title={onShowAndroidHelp ? 'Click to view Android Hotspot & Client information' : undefined}
+        >
           <div className="w-9 h-9 rounded-lg bg-indigo-50 text-indigo-600 flex items-center justify-center shrink-0">
             <Smartphone className="w-5 h-5" />
           </div>
-          <div className="min-w-0">
-            <p className="text-xs text-slate-500 font-medium truncate">Connected Clients</p>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center justify-between">
+              <p className="text-xs text-slate-500 font-medium truncate">Connected Clients</p>
+              {onShowAndroidHelp && (
+                <span className="text-[10px] text-indigo-600 font-semibold hover:underline flex items-center gap-0.5">
+                  <HelpCircle className="w-3 h-3" /> Info
+                </span>
+              )}
+            </div>
             <p className="text-sm font-semibold text-slate-900">
               {connectedClients.length} {connectedClients.length === 1 ? 'Device' : 'Devices'}
             </p>
-            <p className="text-[11px] text-slate-400">
+            <p className="text-[11px] text-slate-400 truncate">
               {status === 'active' && connectedClients.length > 0
                 ? connectedClients.map(c => c.name).join(', ')
                 : status === 'active'
-                ? 'Car connecting...'
-                : 'Offline'}
+                ? 'Broadcasting • Ready for car'
+                : 'Offline (Hotspot off)'}
             </p>
           </div>
         </div>

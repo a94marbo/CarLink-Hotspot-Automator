@@ -283,6 +283,102 @@ public class BluetoothBridgePlugin extends Plugin {
         ret.put("platform", "android");
         ret.put("androidRelease", Build.VERSION.RELEASE);
         ret.put("sdkInt", Build.VERSION.SDK_INT);
+        ret.put("isProtectedByAndroid", Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1);
+        ret.put("isRooted", checkDeviceRootSync());
+        call.resolve(ret);
+    }
+
+    private boolean checkDeviceRootSync() {
+        try {
+            Process process = Runtime.getRuntime().exec(new String[]{"su", "-c", "id"});
+            int exitCode = process.waitFor();
+            return exitCode == 0;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    @PluginMethod
+    public void checkRootStatus(PluginCall call) {
+        boolean rooted = checkDeviceRootSync();
+        JSObject ret = new JSObject();
+        ret.put("isRooted", rooted);
+        ret.put("isProtectedByAndroid", Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1);
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void getHotspotState(PluginCall call) {
+        try {
+            Context context = getContext();
+            WifiManager wifiManager = (WifiManager) context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+            boolean isEnabled = false;
+            int state = 11; // 11 = WIFI_AP_STATE_DISABLED
+
+            if (wifiManager != null) {
+                try {
+                    Method isWifiApEnabledMethod = wifiManager.getClass().getMethod("isWifiApEnabled");
+                    isEnabled = (Boolean) isWifiApEnabledMethod.invoke(wifiManager);
+                } catch (Exception ignored) {}
+
+                try {
+                    Method getWifiApStateMethod = wifiManager.getClass().getMethod("getWifiApState");
+                    state = (Integer) getWifiApStateMethod.invoke(wifiManager);
+                    if (state == 13) { // 13 = WIFI_AP_STATE_ENABLED
+                        isEnabled = true;
+                    }
+                } catch (Exception ignored) {}
+            }
+
+            if (hotspotReservation != null) {
+                isEnabled = true;
+            }
+
+            JSObject ret = new JSObject();
+            ret.put("supported", true);
+            ret.put("enabled", isEnabled);
+            ret.put("stateCode", state);
+            ret.put("status", isEnabled ? "active" : "off");
+            ret.put("isProtectedByAndroid", Build.VERSION.SDK_INT >= Build.VERSION_CODES.N_MR1);
+            ret.put("isRooted", checkDeviceRootSync());
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("Could not read hotspot state: " + e.getMessage(), e);
+        }
+    }
+
+    @PluginMethod
+    public void getConnectedClients(PluginCall call) {
+        JSArray clients = new JSArray();
+        try {
+            java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader("/proc/net/arp"));
+            String line;
+            while ((line = br.readLine()) != null) {
+                String[] splitted = line.split(" +");
+                if (splitted != null && splitted.length >= 4) {
+                    String ip = splitted[0];
+                    String mac = splitted[3];
+                    if (mac != null && mac.matches("..:..:..:..:..:..") && !mac.equalsIgnoreCase("00:00:00:00:00:00")) {
+                        JSObject client = new JSObject();
+                        client.put("id", "arp-" + mac.replace(":", ""));
+                        client.put("ip", ip);
+                        client.put("mac", mac.toUpperCase(Locale.ROOT));
+                        client.put("name", "Car / Client (" + ip + ")");
+                        client.put("connectedAt", System.currentTimeMillis());
+                        client.put("dataUsageMb", 0.0);
+                        clients.put(client);
+                    }
+                }
+            }
+            br.close();
+        } catch (Exception ignored) {
+            // Android 10+ procfs restriction without root
+        }
+
+        JSObject ret = new JSObject();
+        ret.put("count", clients.length());
+        ret.put("clients", clients);
+        ret.put("arpAccessible", clients.length() > 0);
         call.resolve(ret);
     }
 
@@ -296,6 +392,19 @@ public class BluetoothBridgePlugin extends Plugin {
                         String action = intent.getAction();
                         if (action == null) return;
 
+                        // Wi-Fi AP state change broadcast
+                        if ("android.net.wifi.WIFI_AP_STATE_CHANGED".equals(action)) {
+                            int state = intent.getIntExtra("wifi_state", 11);
+                            boolean isActive = (state == 13);
+                            JSObject apEvent = new JSObject();
+                            apEvent.put("stateCode", state);
+                            apEvent.put("isActive", isActive);
+                            apEvent.put("status", isActive ? "active" : (state == 12 ? "enabling" : "off"));
+                            notifyListeners("hotspotNativeStatusChange", apEvent);
+                            return;
+                        }
+
+                        // Bluetooth ACL connection broadcast
                         if (BluetoothDevice.ACTION_ACL_CONNECTED.equals(action) ||
                             BluetoothDevice.ACTION_ACL_DISCONNECTED.equals(action) ||
                             BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED.equals(action)) {
@@ -338,7 +447,13 @@ public class BluetoothBridgePlugin extends Plugin {
                 filter.addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED);
                 filter.addAction(BluetoothAdapter.ACTION_CONNECTION_STATE_CHANGED);
                 filter.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
-                getContext().registerReceiver(bluetoothReceiver, filter);
+                filter.addAction("android.net.wifi.WIFI_AP_STATE_CHANGED");
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    getContext().registerReceiver(bluetoothReceiver, filter, Context.RECEIVER_EXPORTED);
+                } else {
+                    getContext().registerReceiver(bluetoothReceiver, filter);
+                }
                 isListening = true;
             }
 
@@ -368,10 +483,42 @@ public class BluetoothBridgePlugin extends Plugin {
         }
     }
 
+    private boolean executeRootHotspot(boolean enable) {
+        try {
+            String cmd = enable
+                ? "cmd connectivity start-tethering wifi || svc wifi setWifiApEnabled true"
+                : "cmd connectivity stop-tethering 0 || svc wifi setWifiApEnabled false";
+            Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd});
+            int code = p.waitFor();
+            return code == 0;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     @PluginMethod
     public void setHotspotState(PluginCall call) {
         boolean enable = call.getBoolean("enable", true);
         Context context = getContext();
+
+        // 1. Try Root toggle first if phone has root privileges
+        if (checkDeviceRootSync()) {
+            boolean rootSuccess = executeRootHotspot(enable);
+            if (rootSuccess) {
+                JSObject ret = new JSObject();
+                ret.put("success", true);
+                ret.put("status", enable ? "active" : "off");
+                ret.put("method", "root");
+                ret.put("isRooted", true);
+                ret.put("isProtectedByAndroid", false);
+                call.resolve(ret);
+
+                JSObject eventData = new JSObject();
+                eventData.put("status", enable ? "active" : "off");
+                notifyListeners("hotspotStatusChange", eventData);
+                return;
+            }
+        }
 
         try {
             WifiManager wifiManager = (WifiManager) context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
@@ -393,6 +540,7 @@ public class BluetoothBridgePlugin extends Plugin {
                         ret.put("success", true);
                         ret.put("status", "already_active");
                         ret.put("method", "LocalOnlyHotspot");
+                        ret.put("isProtectedByAndroid", true);
                         call.resolve(ret);
                         return;
                     }
@@ -406,6 +554,7 @@ public class BluetoothBridgePlugin extends Plugin {
                             ret.put("success", true);
                             ret.put("status", "active");
                             ret.put("method", "LocalOnlyHotspot");
+                            ret.put("isProtectedByAndroid", true);
                             try {
                                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                                     android.net.wifi.SoftApConfiguration config = reservation.getSoftApConfiguration();
@@ -441,7 +590,9 @@ public class BluetoothBridgePlugin extends Plugin {
                             ret.put("success", false);
                             ret.put("status", "settings_opened");
                             ret.put("reason", reason);
-                            ret.put("message", "Android system restricted direct toggle; opened Hotspot Settings.");
+                            ret.put("isProtectedByAndroid", true);
+                            ret.put("isRooted", false);
+                            ret.put("message", "Android system restricts silent hotspot activation (requires root or 1-tap user toggle). Hotspot settings opened.");
                             call.resolve(ret);
                         }
                     }, new Handler(Looper.getMainLooper()));
@@ -454,6 +605,7 @@ public class BluetoothBridgePlugin extends Plugin {
                         JSObject ret = new JSObject();
                         ret.put("success", true);
                         ret.put("status", "active");
+                        ret.put("isProtectedByAndroid", false);
                         call.resolve(ret);
                         return;
                     } catch (Exception ignored) {}
@@ -485,9 +637,11 @@ public class BluetoothBridgePlugin extends Plugin {
             // If direct activation could not be handled by API, open settings intent
             tryLaunchTetherSettings();
             JSObject ret = new JSObject();
-            ret.put("success", true);
+            ret.put("success", false);
             ret.put("status", "settings_opened");
-            ret.put("message", "Hotspot settings opened");
+            ret.put("isProtectedByAndroid", true);
+            ret.put("isRooted", false);
+            ret.put("message", "Android system restricts silent hotspot activation (requires root or 1-tap user toggle). Hotspot settings opened.");
             call.resolve(ret);
 
         } catch (Exception e) {
@@ -495,6 +649,7 @@ public class BluetoothBridgePlugin extends Plugin {
             JSObject ret = new JSObject();
             ret.put("success", false);
             ret.put("status", "settings_opened");
+            ret.put("isProtectedByAndroid", true);
             ret.put("error", e.getMessage());
             call.resolve(ret);
         }
